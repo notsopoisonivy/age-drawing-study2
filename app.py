@@ -1,6 +1,8 @@
+# import sys
+# st.write(sys.executable)
 import streamlit as st
+from st_supabase_connection import SupabaseConnection
 from streamlit_drawable_canvas import st_canvas
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import numpy as np
 import time
@@ -9,15 +11,27 @@ import time
 st.set_page_config(page_title="Motor Control Study", layout="centered")
 st.title("Age vs Motor Control Study")
 
-# --- Connect to Google Sheets ---
-# This looks for [connections.gsheets] in your .streamlit/secrets.toml
+# This manually pulls the secrets to prove they exist
 try:
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    sheet_available = True
+    # We check if the keys exist first to debug
+    if "connections" in st.secrets and "supabase" in st.secrets["connections"]:
+        s_url = st.secrets["connections"]["supabase"]["url"]
+        s_key = st.secrets["connections"]["supabase"]["key"]
+        
+        conn = st.connection(
+            "supabase",
+            type=SupabaseConnection,
+            url=s_url,
+            key=s_key
+        )
+        db_available = True
+    else:
+        db_available = False
+        st.sidebar.error("Secrets found, but [connections.supabase] section is missing.")
 except Exception as e:
-    sheet_available = False
-    st.sidebar.error("Google Sheets not connected. Download button will be your backup.")
-
+    db_available = False
+    st.sidebar.error(f"Connection Failed: {e}")
+    
 # --- Initialize Session State ---
 if "step" not in st.session_state:
     st.session_state.step = "info"
@@ -43,7 +57,7 @@ if st.session_state.step == "info":
         else:
             st.error("Please enter a Participant ID")
 
-# --- Step 2: Drawing Tasks (Timing + Sync) ---
+# --- Step 2: Drawing Tasks ---
 elif st.session_state.step == "drawing":
     idx = st.session_state.task_index
     current_task = drawing_tasks[idx]
@@ -62,7 +76,6 @@ elif st.session_state.step == "drawing":
         key=f"canvas_{idx}" 
     )
 
-    # Capture the "First Touch" for accurate duration
     if canvas_result.json_data and canvas_result.json_data.get("objects"):
         if f"first_touch_{idx}" not in st.session_state:
             st.session_state[f"first_touch_{idx}"] = time.time()
@@ -82,31 +95,27 @@ elif st.session_state.step == "drawing":
                 for i, p in enumerate(all_points):
                     point_ts = actual_start + (i / num_points) * total_duration
                     row = {
-                        "participant_id": st.session_state.participant_id,
-                        "age_group": st.session_state.age_group,
+                        "participant_id": str(st.session_state.participant_id),
+                        "age_group": int(st.session_state.age_group),
                         "task": current_task,
-                        "x": p[1],
-                        "y": p[2],
-                        "timestamp": point_ts,
-                        "point_index": i,
-                        "total_task_duration": total_duration
+                        "x": float(p[1]),
+                        "y": float(p[2]),
+                        "timestamp": float(point_ts),
+                        "point_index": int(i),
+                        "total_task_duration": float(total_duration)
                     }
                     st.session_state.all_data.append(row)
                     new_rows.append(row)
                 
-                # --- GOOGLE SHEETS SYNC ---
-                if sheet_available:
-                    with st.spinner("Syncing to Google Sheets..."):
+                # --- SUPABASE SYNC ---
+                if db_available:
+                    with st.spinner("Syncing to Database..."):
                         try:
-                            # Try to append to existing data
-                            existing_df = conn.read(worksheet="MotorStudy")
-                            updated_df = pd.concat([existing_df, pd.DataFrame(new_rows)], ignore_index=True)
-                            conn.update(worksheet="MotorStudy", data=updated_df)
-                        except Exception:
-                            # If sheet is empty/new, just upload the new rows
-                            conn.update(worksheet="MotorStudy", data=pd.DataFrame(new_rows))
+                            # In Supabase, we just insert the list of dictionaries
+                            conn.table("motor_data").insert(new_rows).execute()
+                        except Exception as e:
+                            st.error(f"Database sync failed: {e}")
 
-                # Advance Task
                 if idx + 1 < len(drawing_tasks):
                     st.session_state.task_index += 1
                 else:
@@ -127,13 +136,21 @@ elif st.session_state.step == "typing":
         
         if submit_typing:
             if typed_text:
-                st.session_state.all_data.append({
-                    "participant_id": st.session_state.participant_id,
-                    "age_group": st.session_state.age_group,
+                typing_row = {
+                    "participant_id": str(st.session_state.participant_id),
+                    "age_group": int(st.session_state.age_group),
                     "task": "Typing",
-                    "timestamp": time.time(),
-                    "content": typed_text
-                })
+                    "x": 0.0, # Placeholder for DB schema consistency
+                    "y": 0.0,
+                    "timestamp": float(time.time()),
+                    "point_index": 0,
+                    "total_task_duration": 0.0
+                }
+                st.session_state.all_data.append(typing_row)
+                
+                if db_available:
+                    conn.table("motor_data").insert([typing_row]).execute()
+                
                 st.session_state.step = "download"
                 st.rerun()
 
@@ -141,7 +158,6 @@ elif st.session_state.step == "typing":
 elif st.session_state.step == "download":
     st.header("Study Complete!")
     st.balloons()
-    
     df = pd.DataFrame(st.session_state.all_data)
     csv = df.to_csv(index=False).encode('utf-8')
     st.download_button(label="📥 Download Results CSV", data=csv, file_name="study_results.csv")

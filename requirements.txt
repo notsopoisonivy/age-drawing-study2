@@ -2,5 +2,4 @@ streamlit==1.30.0
 streamlit-drawable-canvas
 pandas
 numpy
-altair==4.2.2
-st-gsheets-connection
+st-supabase-connection
